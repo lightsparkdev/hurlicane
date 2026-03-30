@@ -48,6 +48,9 @@ export function initDb(dbPath: string): DatabaseSync {
   if (!jobCols.includes('use_worktree')) {
     db.exec('ALTER TABLE jobs ADD COLUMN use_worktree INTEGER NOT NULL DEFAULT 0');
   }
+  if (!jobCols.includes('archived_at')) {
+    db.exec('ALTER TABLE jobs ADD COLUMN archived_at INTEGER');
+  }
 
   // Projects table
   db.exec(`
@@ -308,9 +311,6 @@ export function initDb(dbPath: string): DatabaseSync {
   }
   if (!jobCols.includes('review_parent_job_id')) {
     db.exec('ALTER TABLE jobs ADD COLUMN review_parent_job_id TEXT');
-  }
-  if (!jobCols.includes('archived_at')) {
-    db.exec('ALTER TABLE jobs ADD COLUMN archived_at INTEGER');
   }
   if (!jobCols.includes('created_by_agent_id')) {
     db.exec('ALTER TABLE jobs ADD COLUMN created_by_agent_id TEXT');
