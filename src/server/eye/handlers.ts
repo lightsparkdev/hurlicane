@@ -93,6 +93,10 @@ export function resetState(): void {
     clearTimeout(buf.timer);
     prUpdateBuffers.delete(key);
   }
+  for (const [key, buf] of ciFailureBuffers) {
+    clearTimeout(buf.timer);
+    ciFailureBuffers.delete(key);
+  }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -126,6 +130,12 @@ const REVIEW_DEBOUNCE_MS = 5_000;
 // reviews and comments separately.
 
 const PR_UPDATE_DEBOUNCE_MS = 10_000;
+
+// ─── CI Failure Debounce ─────────────────────────────────────────────────────
+// Multiple check_suite / check_run failure webhooks often arrive in quick
+// succession for the same PR. We batch them into a single job.
+
+const CI_FAILURE_DEBOUNCE_MS = 60_000;
 
 interface BufferedReview {
   reviewId: string;
@@ -420,6 +430,131 @@ function clearPrUpdateBuffers(prefix: string): void {
   }
 }
 
+// ─── CI Failure Debounce Buffers ─────────────────────────────────────────────
+
+interface CiFailureItem {
+  kind: 'check_suite' | 'check_run';
+  name: string;
+  conclusion: string;
+  id: string;
+}
+
+interface CiFailureBuffer {
+  timer: ReturnType<typeof setTimeout>;
+  items: CiFailureItem[];
+  repo: string;
+  prNum: number;
+  branch: string;
+  config: EyeConfig;
+  dispatchContext: {
+    client: OrchestratorClient;
+    lastPayload: any;
+  };
+}
+
+const ciFailureBuffers = new Map<string, CiFailureBuffer>();
+
+function flushCiFailureBuffer(key: string): void {
+  const buf = ciFailureBuffers.get(key);
+  if (!buf) return;
+  ciFailureBuffers.delete(key);
+
+  const { items, repo, prNum, branch, config, dispatchContext } = buf;
+  if (items.length === 0) return;
+
+  const failNames = items.map(i => i.name).join(', ');
+  const title = `CI: ${items.length} check${items.length > 1 ? 's' : ''} failed on ${repo}#${prNum}`;
+  const parts = [
+    `CI checks failed on ${repo}#${prNum} (branch: ${branch}):`,
+  ];
+  for (const i of items) {
+    parts.push(`- ${i.name}: ${i.conclusion}`);
+  }
+  parts.push(`\nInvestigate the failure${items.length > 1 ? 's' : ''} and push a fix.`);
+
+  const job = buildJob(config, title, parts.join('\n'), 5, {
+    repo, pr: String(prNum), branch,
+  });
+
+  const { client, lastPayload } = dispatchContext;
+  // Use check_suite as the event type for filter matching
+  const eventType = items[items.length - 1].kind;
+  processEvent(client, config, eventType, lastPayload, job).then(result => {
+    const action = lastPayload.action ?? '';
+    const author = lastPayload.sender?.login ?? '';
+    if (result) {
+      logEvent({ ts: Date.now(), event_type: eventType, action: 'debounced', repo, author, decision: 'ran', job_title: result.title, detail: `count=${result.count}, checks=${items.length} (${failNames})` });
+    } else {
+      logEvent({ ts: Date.now(), event_type: eventType, action: 'debounced', repo, author, decision: 'ignored', job_title: null, detail: 'no bindings matched filters or job creation failed' });
+    }
+  }).catch(err => {
+    console.error('[eye] failed to flush ci_failure buffer:', err);
+  });
+}
+
+function bufferCiFailure(
+  eventType: 'check_suite' | 'check_run',
+  payload: any,
+  config: EyeConfig,
+  client: OrchestratorClient,
+): string {
+  if (payload.action !== 'completed') return `action "${payload.action}" (want "completed")`;
+
+  const source = eventType === 'check_suite' ? payload.check_suite : payload.check_run;
+  if (!source) return `no ${eventType} in payload`;
+
+  const conclusion = source.conclusion ?? 'unknown';
+  if (conclusion !== 'failure' && conclusion !== 'timed_out') return `conclusion "${conclusion}" (not a failure)`;
+
+  const repo = payload.repository?.full_name;
+  if (!repo) return 'no repo in payload';
+
+  const prs: any[] = source.pull_requests ?? [];
+  if (prs.length === 0) return 'no linked PRs';
+  const pr = prs[0];
+  const prNum = pr.number;
+  const branch = pr.head?.ref ?? '';
+
+  const dedupKey = `ci:${repo}#${prNum}:${eventType === 'check_suite' ? 'suite' : 'run'}:${source.id}`;
+  if (isDuplicate(dedupKey)) return 'duplicate';
+
+  const name = (eventType === 'check_suite' ? source.app?.name : source.name) ?? 'CI';
+
+  const item: CiFailureItem = { kind: eventType, name, conclusion, id: String(source.id) };
+
+  const bufferKey = `ci_failure:${repo}#${prNum}`;
+  const existing = ciFailureBuffers.get(bufferKey);
+
+  if (existing) {
+    clearTimeout(existing.timer);
+    existing.items.push(item);
+    existing.dispatchContext.lastPayload = payload;
+    existing.timer = setTimeout(() => flushCiFailureBuffer(bufferKey), CI_FAILURE_DEBOUNCE_MS);
+  } else {
+    const timer = setTimeout(() => flushCiFailureBuffer(bufferKey), CI_FAILURE_DEBOUNCE_MS);
+    ciFailureBuffers.set(bufferKey, {
+      timer,
+      items: [item],
+      repo,
+      prNum,
+      branch,
+      config,
+      dispatchContext: { client, lastPayload: payload },
+    });
+  }
+
+  return 'debounced';
+}
+
+function clearCiFailureBuffers(prefix: string): void {
+  for (const [key, buf] of ciFailureBuffers) {
+    if (key.startsWith(`ci_failure:${prefix}`)) {
+      clearTimeout(buf.timer);
+      ciFailureBuffers.delete(key);
+    }
+  }
+}
+
 // ─── Event Handlers ─────────────────────────────────────────────────────────
 
 type HandlerResult = CreateJobRequest | string;
@@ -630,6 +765,7 @@ async function handlePullRequestMeta(payload: any, _config: EyeConfig, client: O
     clearDedupPrefix(prefix);
     clearReviewBuffers(`${repo}#${prNum}:`);
     clearPrUpdateBuffers(`${repo}#${prNum}`);
+    clearCiFailureBuffers(`${repo}#${prNum}`);
     console.log(`[eye] reset CI dedup for ${repo}#${prNum}`);
     return null;
   }
@@ -640,6 +776,7 @@ async function handlePullRequestMeta(payload: any, _config: EyeConfig, client: O
     clearDedupPrefix(`comment:${repo}#${prNum}:`);
     clearReviewBuffers(`${repo}#${prNum}:`);
     clearPrUpdateBuffers(`${repo}#${prNum}`);
+    clearCiFailureBuffers(`${repo}#${prNum}`);
     console.log(`[eye] cleaned dedup for ${repo}#${prNum} (converted to draft)`);
     return null;
   }
@@ -650,6 +787,7 @@ async function handlePullRequestMeta(payload: any, _config: EyeConfig, client: O
     clearDedupPrefix(`comment:${repo}#${prNum}:`);
     clearReviewBuffers(`${repo}#${prNum}:`);
     clearPrUpdateBuffers(`${repo}#${prNum}`);
+    clearCiFailureBuffers(`${repo}#${prNum}`);
     const branch = pr.head?.ref;
     const merged = pr.merged === true;
     if (branch) {
@@ -744,6 +882,22 @@ export async function dispatch(
       logEvent({ ts: Date.now(), event_type: eventType, action, repo, author, decision: 'ignored', job_title: null, detail: reason });
     }
     return null;
+  }
+
+  // CI failures are debounced — multiple check_suite/check_run failures for the
+  // same PR are batched into a single job.
+  if (eventType === 'check_suite' || eventType === 'check_run') {
+    const source = eventType === 'check_suite' ? payload.check_suite : payload.check_run;
+    const conclusion = source?.conclusion ?? '';
+    if (conclusion === 'failure' || conclusion === 'timed_out') {
+      const reason = bufferCiFailure(eventType, payload, config, client);
+      if (reason === 'debounced') {
+        logEvent({ ts: Date.now(), event_type: eventType, action, repo, author, decision: 'ignored', job_title: null, detail: 'debounced (waiting for more CI results)' });
+      } else {
+        logEvent({ ts: Date.now(), event_type: eventType, action, repo, author, decision: 'ignored', job_title: null, detail: reason });
+      }
+      return null;
+    }
   }
 
   let handlerResult: HandlerResult;
