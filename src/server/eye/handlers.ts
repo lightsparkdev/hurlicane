@@ -97,6 +97,7 @@ export function resetState(): void {
     clearTimeout(buf.timer);
     ciFailureBuffers.delete(key);
   }
+  firedCiCommits.clear();
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -133,7 +134,7 @@ const PR_UPDATE_DEBOUNCE_MS = 10_000;
 
 // ─── CI Failure Debounce ─────────────────────────────────────────────────────
 // Multiple check_suite / check_run failure webhooks often arrive in quick
-// succession for the same PR. We batch them into a single job.
+// succession for the same commit. We batch them per commit SHA into a single job.
 
 const CI_FAILURE_DEBOUNCE_MS = 60_000;
 
@@ -445,6 +446,7 @@ interface CiFailureBuffer {
   repo: string;
   prNum: number;
   branch: string;
+  headSha: string;
   config: EyeConfig;
   dispatchContext: {
     client: OrchestratorClient;
@@ -454,18 +456,25 @@ interface CiFailureBuffer {
 
 const ciFailureBuffers = new Map<string, CiFailureBuffer>();
 
+// Track commit SHAs that have already fired a CI failure event so we only fire once per commit.
+const firedCiCommits = new Set<string>();
+
 function flushCiFailureBuffer(key: string): void {
   const buf = ciFailureBuffers.get(key);
   if (!buf) return;
   ciFailureBuffers.delete(key);
 
-  const { items, repo, prNum, branch, config, dispatchContext } = buf;
+  const { items, repo, prNum, branch, headSha, config, dispatchContext } = buf;
   if (items.length === 0) return;
 
+  // Mark this commit as fired so no further CI failure events fire for it.
+  if (headSha) firedCiCommits.add(`${repo}#${prNum}:${headSha}`);
+
   const failNames = items.map(i => i.name).join(', ');
-  const title = `CI: ${items.length} check${items.length > 1 ? 's' : ''} failed on ${repo}#${prNum}`;
+  const shortSha = headSha ? headSha.slice(0, 7) : 'unknown';
+  const title = `CI: ${items.length} check${items.length > 1 ? 's' : ''} failed on ${repo}#${prNum} (${shortSha})`;
   const parts = [
-    `CI checks failed on ${repo}#${prNum} (branch: ${branch}):`,
+    `CI checks failed on ${repo}#${prNum} (branch: ${branch}, commit: ${headSha || 'unknown'}):`,
   ];
   for (const i of items) {
     parts.push(`- ${i.name}: ${i.conclusion}`);
@@ -514,6 +523,10 @@ function bufferCiFailure(
   const pr = prs[0];
   const prNum = pr.number;
   const branch = pr.head?.ref ?? '';
+  const headSha: string = source.head_sha ?? '';
+
+  const commitKey = `${repo}#${prNum}:${headSha}`;
+  if (headSha && firedCiCommits.has(commitKey)) return `already fired for commit ${headSha.slice(0, 7)}`;
 
   const dedupKey = `ci:${repo}#${prNum}:${eventType === 'check_suite' ? 'suite' : 'run'}:${source.id}`;
   if (isDuplicate(dedupKey)) return 'duplicate';
@@ -522,7 +535,7 @@ function bufferCiFailure(
 
   const item: CiFailureItem = { kind: eventType, name, conclusion, id: String(source.id) };
 
-  const bufferKey = `ci_failure:${repo}#${prNum}`;
+  const bufferKey = `ci_failure:${repo}#${prNum}:${headSha}`;
   const existing = ciFailureBuffers.get(bufferKey);
 
   if (existing) {
@@ -538,6 +551,7 @@ function bufferCiFailure(
       repo,
       prNum,
       branch,
+      headSha,
       config,
       dispatchContext: { client, lastPayload: payload },
     });
