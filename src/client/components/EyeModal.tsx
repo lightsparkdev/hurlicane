@@ -83,6 +83,9 @@ const FILTER_FIELDS: Record<string, FilterFieldDef[]> = {
   pr_update: [
     ...COMMON_FILTERS,
   ],
+  merge_conflict: [
+    ...COMMON_FILTERS,
+  ],
 };
 
 const EVENT_TYPES: { key: string; label: string; description: string }[] = [
@@ -91,6 +94,7 @@ const EVENT_TYPES: { key: string; label: string; description: string }[] = [
   { key: 'pull_request_review', label: 'PR Reviews', description: 'Review comments and change requests' },
   { key: 'issue_comment', label: 'PR Comments', description: 'Comments on pull requests' },
   { key: 'pr_update', label: 'PR Update', description: 'Debounced reviews + comments (10s window)' },
+  { key: 'merge_conflict', label: 'Merge Conflict', description: 'Draft PRs with merge conflicts (polled every 5m)' },
 ];
 
 interface EyeApiState {
@@ -130,6 +134,8 @@ function eventIcon(eventType: string): string {
       return 'Cmt';
     case 'pr_update':
       return 'Upd';
+    case 'merge_conflict':
+      return 'Mrg';
     case 'pull_request':
       return 'PR';
     default:

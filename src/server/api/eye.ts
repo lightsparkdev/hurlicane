@@ -2,7 +2,7 @@ import { Router } from 'express';
 import express from 'express';
 import * as queries from '../db/queries.js';
 import { verifySignature } from '../eye/signature.js';
-import { dispatch, getRecentEvents, getDedupStats, startDedupCleanup, stopDedupCleanup, resetState } from '../eye/handlers.js';
+import { dispatch, getRecentEvents, getDedupStats, startDedupCleanup, stopDedupCleanup, resetState, startMergeConflictPoll, stopMergeConflictPoll } from '../eye/handlers.js';
 import { createDirectClient } from '../eye/directClient.js';
 import type { EyeConfig } from '../eye/types.js';
 
@@ -224,6 +224,10 @@ router.post('/start', (_req, res) => {
   jobsCreated = 0;
   resetState();
   startDedupCleanup();
+  startMergeConflictPoll(
+    { webhookSecret: settings.webhookSecret, author: settings.author },
+    client,
+  );
 
   console.log(`[eye] activated (author: ${settings.author})`);
   res.json({ ok: true });
@@ -238,6 +242,7 @@ router.post('/stop', (_req, res) => {
 
   eyeActive = false;
   stopDedupCleanup();
+  stopMergeConflictPoll();
   console.log('[eye] deactivated');
   res.json({ ok: true });
 });
@@ -274,6 +279,7 @@ export function stopEye(): void {
   if (eyeActive) {
     eyeActive = false;
     stopDedupCleanup();
+    stopMergeConflictPoll();
   }
 }
 

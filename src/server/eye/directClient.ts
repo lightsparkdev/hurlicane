@@ -112,6 +112,10 @@ export function createDirectClient(): OrchestratorClient {
       return queries.getRepoByName(name);
     },
 
+    async listRepos(): Promise<Repo[]> {
+      return queries.listRepos();
+    },
+
     async getWorktreeByBranch(branch: string): Promise<Worktree | null> {
       return queries.getWorktreeByBranch(branch) ?? null;
     },

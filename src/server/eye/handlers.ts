@@ -98,6 +98,7 @@ export function resetState(): void {
     ciFailureBuffers.delete(key);
   }
   firedCiCommits.clear();
+  firedMergeConflicts.clear();
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -567,6 +568,142 @@ function clearCiFailureBuffers(prefix: string): void {
       ciFailureBuffers.delete(key);
     }
   }
+}
+
+// ─── Merge Conflict Polling ──────────────────────────────────────────────────
+// Polls draft PRs (created within the last week) for merge conflicts and fires
+// a single event per PR. Once fired for a given PR, it won't fire again until
+// the conflict is resolved and reappears.
+
+const MERGE_CONFLICT_POLL_MS = 5 * 60_000; // every 5 minutes
+
+// Tracks repo#prNum keys that have already fired a merge_conflict event.
+// Cleared when the PR is no longer in a conflicting state so it can re-fire.
+const firedMergeConflicts = new Set<string>();
+
+let mergeConflictInterval: ReturnType<typeof setInterval> | null = null;
+let mergeConflictConfig: EyeConfig | null = null;
+let mergeConflictClient: import('./types.js').OrchestratorClient | null = null;
+
+interface ConflictingPR {
+  repo: string;
+  number: number;
+  title: string;
+  branch: string;
+  baseBranch: string;
+}
+
+function ghJson(args: string): any | null {
+  try {
+    return JSON.parse(execSync(`gh ${args} 2>/dev/null`, { encoding: 'utf8', timeout: 30_000 }));
+  } catch {
+    return null;
+  }
+}
+
+async function pollMergeConflicts(): Promise<void> {
+  const config = mergeConflictConfig;
+  const client = mergeConflictClient;
+  if (!config || !client) return;
+
+  const prompts = await client.getPrompts();
+  if (prompts.disabledEvents.includes('merge_conflict')) return;
+
+  const bindings = prompts.eventTemplates['merge_conflict'] ?? [];
+  if (bindings.length === 0) return;
+
+  const repos = await client.listRepos();
+  if (repos.length === 0) return;
+
+  const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
+
+  for (const repo of repos) {
+    const repoName = repo.name;
+    try {
+      // List open draft PRs by the configured author, created within the last week
+      const prs = ghJson(
+        `pr list --repo ${JSON.stringify(repoName)} --state open --author ${JSON.stringify(config.author)} --json number,title,headRefName,baseRefName,isDraft,mergeable,createdAt`
+      );
+      if (!prs || !Array.isArray(prs)) continue;
+
+      for (const pr of prs) {
+        if (!pr.isDraft) continue;
+        if (pr.createdAt && pr.createdAt < oneWeekAgo) continue;
+
+        const prKey = `${repoName}#${pr.number}`;
+
+        // mergeable === 'CONFLICTING' means there's a merge conflict
+        if (pr.mergeable === 'CONFLICTING') {
+          if (firedMergeConflicts.has(prKey)) continue;
+
+          firedMergeConflicts.add(prKey);
+
+          const title = `Merge conflict on ${repoName}#${pr.number}`;
+          const description = [
+            `Draft PR ${repoName}#${pr.number} ("${pr.title}") has a merge conflict.`,
+            `Branch: ${pr.headRefName} → ${pr.baseRefName}`,
+            `\nResolve the merge conflict so CI can run.`,
+          ].join('\n');
+
+          const job = buildJob(config, title, description, 3, {
+            repo: repoName,
+            pr: String(pr.number),
+            branch: pr.headRefName,
+          });
+
+          job.repoId = repo.id;
+          job.branch = pr.headRefName;
+
+          // Synthesize a minimal payload for processEvent filter matching
+          const syntheticPayload = {
+            repository: { full_name: repoName },
+            sender: { login: config.author },
+            pull_request: {
+              number: pr.number,
+              user: { login: config.author },
+              draft: true,
+              head: { ref: pr.headRefName },
+              base: { ref: pr.baseRefName },
+            },
+          };
+
+          const result = await processEvent(client, config, 'merge_conflict', syntheticPayload, job);
+          if (result) {
+            logEvent({ ts: Date.now(), event_type: 'merge_conflict', action: 'poll', repo: repoName, author: config.author, decision: 'ran', job_title: result.title, detail: `PR #${pr.number} has merge conflict` });
+          } else {
+            logEvent({ ts: Date.now(), event_type: 'merge_conflict', action: 'poll', repo: repoName, author: config.author, decision: 'ignored', job_title: null, detail: 'no bindings matched filters or job creation failed' });
+          }
+        } else {
+          // Conflict resolved — allow re-firing if it comes back
+          firedMergeConflicts.delete(prKey);
+        }
+      }
+    } catch (err: any) {
+      console.error(`[eye] merge conflict poll error for ${repoName}:`, err.message);
+    }
+  }
+}
+
+export function startMergeConflictPoll(config: EyeConfig, client: import('./types.js').OrchestratorClient): void {
+  mergeConflictConfig = config;
+  mergeConflictClient = client;
+  if (mergeConflictInterval) return;
+  // Run immediately, then on interval
+  pollMergeConflicts().catch(err => console.error('[eye] merge conflict poll error:', err));
+  mergeConflictInterval = setInterval(() => {
+    pollMergeConflicts().catch(err => console.error('[eye] merge conflict poll error:', err));
+  }, MERGE_CONFLICT_POLL_MS);
+  mergeConflictInterval.unref();
+  console.log('[eye] merge conflict polling started (every 5 minutes)');
+}
+
+export function stopMergeConflictPoll(): void {
+  if (mergeConflictInterval) {
+    clearInterval(mergeConflictInterval);
+    mergeConflictInterval = null;
+  }
+  mergeConflictConfig = null;
+  mergeConflictClient = null;
 }
 
 // ─── Event Handlers ─────────────────────────────────────────────────────────

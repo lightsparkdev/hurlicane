@@ -26,6 +26,7 @@ export interface EyeConfig {
 export interface OrchestratorClient {
   createJob(req: CreateJobRequest): Promise<{ id: string; title: string } | null>;
   getRepoByName(name: string): Promise<Repo | null>;
+  listRepos(): Promise<Repo[]>;
   getWorktreeByBranch(branch: string): Promise<Worktree | null>;
   createWorktree(branch: string, repoId: string, trackExisting?: boolean): Promise<Worktree | null>;
   cleanupBranch(branch: string, merged?: boolean): Promise<{ found: boolean; cancelledJobs: number } | null>;
