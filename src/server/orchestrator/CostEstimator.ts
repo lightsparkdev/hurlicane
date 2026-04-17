@@ -13,6 +13,8 @@ interface ModelPricing {
 
 // Pricing as of May 2025 — update when Anthropic changes rates.
 const PRICING: Record<string, ModelPricing> = {
+  'claude-opus-4-7':         { inputPerMillion: 15,  outputPerMillion: 75 },
+  'claude-opus-4-7[1m]':     { inputPerMillion: 15,  outputPerMillion: 75 },
   'claude-opus-4-6':         { inputPerMillion: 15,  outputPerMillion: 75 },
   'claude-opus-4-6[1m]':     { inputPerMillion: 15,  outputPerMillion: 75 },
   'claude-sonnet-4-6':       { inputPerMillion: 3,   outputPerMillion: 15 },

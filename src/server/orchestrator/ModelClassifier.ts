@@ -12,7 +12,7 @@ const CLASSIFIER_MODEL = 'claude-haiku-4-5-20251001';
 const COMPLEXITY_TO_MODEL: Record<string, string> = {
   simple:  'claude-haiku-4-5-20251001',
   medium:  'claude-sonnet-4-6[1m]',
-  complex: 'claude-opus-4-6[1m]',
+  complex: 'claude-opus-4-7[1m]',
 };
 
 // ─── Rate Limit Fallback Chain ──────────────────────────────────────────────
@@ -24,6 +24,8 @@ const COMPLEXITY_TO_MODEL: Record<string, string> = {
 // Codex (GPT-5.4 via OpenAI) is the final fallback — different API provider,
 // so Anthropic rate limits don't affect it.
 const MODEL_FALLBACK_CHAIN: string[] = [
+  'claude-opus-4-7[1m]',
+  'claude-opus-4-7',
   'claude-opus-4-6[1m]',
   'claude-opus-4-6',
   'claude-sonnet-4-6[1m]',
@@ -37,6 +39,8 @@ const MODEL_FALLBACK_CHAIN: string[] = [
 // dispatched outside the fallback chain — e.g. a classifier-only model — is
 // still tracked by the breaker.
 export const KNOWN_MODELS: readonly string[] = [
+  'claude-opus-4-7',
+  'claude-opus-4-7[1m]',
   'claude-opus-4-6',
   'claude-opus-4-6[1m]',
   'claude-sonnet-4-6',

@@ -826,6 +826,7 @@ function getWorkflowFallbackModel(workflow: Workflow, phase: WorkflowPhase, curr
   if (phase === 'review') candidates.add(workflow.reviewer_model);
   candidates.add(workflow.implementer_model);
   candidates.add('claude-sonnet-4-6[1m]');
+  candidates.add('claude-opus-4-7[1m]');
   candidates.add('claude-opus-4-6[1m]');
   candidates.add('claude-haiku-4-5-20251001');
   candidates.add('codex');

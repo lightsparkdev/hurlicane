@@ -8,7 +8,8 @@ export interface ModelOption {
 
 /** Claude models available for job dispatch. */
 export const CLAUDE_MODEL_OPTIONS: ModelOption[] = [
-  { value: 'claude-opus-4-6[1m]',        label: 'claude-opus-4-6[1m] — most capable, 1M context' },
+  { value: 'claude-opus-4-7[1m]',        label: 'claude-opus-4-7[1m] — most capable, 1M context (latest)' },
+  { value: 'claude-opus-4-6[1m]',        label: 'claude-opus-4-6[1m] — 1M context (previous)' },
   { value: 'claude-sonnet-4-6[1m]',      label: 'claude-sonnet-4-6[1m] — balanced, 1M context' },
   { value: 'claude-haiku-4-5-20251001',  label: 'claude-haiku-4-5 — fastest, cheapest' },
 ];
