@@ -142,47 +142,52 @@ export interface RunOptions {
  * calls across parallel workflow phases can race between read-check and
  * append-write, producing duplicate sections.
  */
+// In-memory cache of workDirs we've already confirmed trusted in this process.
+// Eliminates redundant fs reads on every agent spawn after the first.
+const _trustedWorkDirs = new Set<string>();
+
 export function ensureCodexTrusted(workDir: string): void {
+  if (_trustedWorkDirs.has(workDir)) return;
+
   const configPath = path.join(process.env.HOME ?? '', '.codex', 'config.toml');
   try {
     let content = '';
     try { content = fs.readFileSync(configPath, 'utf8'); } catch { /* file doesn't exist yet */ }
 
-    // Normalize: ensure trailing newline so the section regex captures the
-    // final section's body even if the file was hand-edited without a
-    // trailing newline. Writers in this function always emit a trailing
-    // newline, so this only matters for externally-edited files.
     if (content.length > 0 && !content.endsWith('\n')) content += '\n';
 
     const key = `[projects.${JSON.stringify(workDir)}]`;
     const sectionRe = buildSectionRegex(key);
     const matches = [...content.matchAll(sectionRe)];
 
-    if (matches.length === 0) {
-      // Not trusted yet — append a fresh entry.
-      const entry = `\n${key}\ntrust_level = "trusted"\n`;
-      fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.appendFileSync(configPath, entry);
+    if (matches.length === 1) {
+      _trustedWorkDirs.add(workDir);
       return;
     }
 
-    if (matches.length === 1) return; // already trusted, single entry
-
-    // Multiple entries — dedupe. Keep the first occurrence, remove the rest.
-    // This self-heals any past race damage on the next call.
-    let deduped = content;
-    for (const m of matches.slice(1).reverse()) {
-      deduped = deduped.slice(0, m.index!) + deduped.slice(m.index! + m[0].length);
+    // Either no entry (add one) or multiple (dedupe to one). In both cases
+    // compute the final desired content and write atomically via rename.
+    // NEVER use appendFileSync: concurrent processes racing between read and
+    // append can both observe 0 matches and both append, producing duplicate
+    // [projects."..."] sections that cause codex to fail with a TOML parse error.
+    let desired: string;
+    if (matches.length === 0) {
+      const sep = content.length === 0 || content.endsWith('\n\n') ? '' : '\n';
+      desired = content + sep + `${key}\ntrust_level = "trusted"\n`;
+    } else {
+      // matches.length > 1 — keep first, strip the rest
+      desired = content;
+      for (const m of matches.slice(1).reverse()) {
+        desired = desired.slice(0, m.index!) + desired.slice(m.index! + m[0].length);
+      }
+      desired = desired.replace(/\n{3,}/g, '\n\n');
     }
-    // Collapse 3+ consecutive newlines (left over from removal) into 2.
-    deduped = deduped.replace(/\n{3,}/g, '\n\n');
 
-    // Atomic rewrite: write to a sibling temp file, then rename over the
-    // original. `fs.renameSync` is atomic on POSIX, so the config file is
-    // never observed in a half-written state if the process is killed mid-write.
-    const tmpPath = `${configPath}.tmp-${process.pid}`;
-    fs.writeFileSync(tmpPath, deduped);
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    const tmpPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(tmpPath, desired);
     fs.renameSync(tmpPath, configPath);
+    _trustedWorkDirs.add(workDir);
   } catch (err) {
     console.warn(`[codex] failed to add trust for ${workDir}:`, err);
   }
