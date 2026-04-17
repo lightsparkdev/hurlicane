@@ -21,6 +21,7 @@ import { runRecovery, startWorkflowGapDetector, stopWorkflowGapDetector } from '
 import { rehydrateCooldownState } from './orchestrator/ModelClassifier.js';
 import { startResourceMonitor, stopResourceMonitor, setQueueControls } from './orchestrator/ResourceMonitor.js';
 import { startDbBackup, stopDbBackup, runBackupNow } from './orchestrator/DbBackup.js';
+import { runStartupMaintenance } from './orchestrator/StartupMaintenance.js';
 import { writeInput, resizePty, resizeAndSnapshot, saveSnapshot, isTmuxSessionAlive } from './orchestrator/PtyManager.js';
 import * as queries from './db/queries.js';
 import type { QueueSnapshot } from '../shared/types.js';
@@ -58,6 +59,10 @@ async function main() {
 
   // Populate FTS index for any existing output rows not yet indexed
   queries.rebuildFts();
+
+  // Prune old agent logs / orphaned output rows, checkpoint WAL, and VACUUM
+  // if the DB has grown past the threshold. Runs once, non-fatal on failure.
+  runStartupMaintenance();
 
   // Rehydrate rate-limit cooldown state from DB so cooldowns survive restarts
   rehydrateCooldownState();
@@ -244,12 +249,17 @@ async function main() {
     }
 
     // Phase 5: Stop accepting new HTTP connections; wait for in-flight requests to drain
+    // closeAllConnections() force-destroys keep-alive sockets so close() resolves
+    // quickly instead of waiting for client timeouts, which was the cause of
+    // EADDRINUSE errors on fast restart (agents hold MCP keepalive connections).
+    httpServer.closeAllConnections?.();
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
 
     // Close all active MCP sessions so clients get a clean disconnect
     await closeAllMcpSessions();
 
     // Close the MCP server
+    mcpServer.closeAllConnections?.();
     await new Promise<void>((resolve) => mcpServer.close(() => resolve()));
 
     // Disconnect all Socket.io clients
