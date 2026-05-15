@@ -64,7 +64,6 @@ export function initDb(dbPath: string): DatabaseSync {
     db.exec('ALTER TABLE jobs ADD COLUMN project_id TEXT REFERENCES projects(id)');
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_archived ON jobs(archived_at)');
 
   const agentCols: string[] = (db.prepare('PRAGMA table_info(agents)').all() as any[]).map((r: any) => r.name);
   if (!agentCols.includes('parent_agent_id')) {
@@ -312,6 +311,7 @@ export function initDb(dbPath: string): DatabaseSync {
   if (!jobCols.includes('archived_at')) {
     db.exec('ALTER TABLE jobs ADD COLUMN archived_at INTEGER');
   }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_archived ON jobs(archived_at)');
   if (!jobCols.includes('created_by_agent_id')) {
     db.exec('ALTER TABLE jobs ADD COLUMN created_by_agent_id TEXT');
   }
